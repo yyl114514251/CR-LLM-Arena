@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CR-LLM-Arena · 皇室战争模拟对战</title>
+<style>
+  :root{
+    --bg:#1c2a24; --panel:#243630; --ink:#e8e6dc; --muted:#9db0a6;
+    --accent:#d8a03c; --grass:#6d9440; --grass2:#5f8738;
+    --red:#d9544f; --blue:#4f7fd9; --shadow:0 2px 6px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    background:var(--bg); color:var(--ink);
+    min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  .layout{display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; justify-content:center}
+  .arena-wrap{
+    background:var(--panel); border-radius:14px; padding:16px;
+    box-shadow:0 8px 30px rgba(0,0,0,.4);
+  }
+  .head{display:flex; justify-content:space-between; align-items:center; margin-bottom:12px}
+  .title{font-weight:700; letter-spacing:.5px}
+  .status{font-size:13px; color:var(--muted)}
+  .status b{color:var(--accent)}
+  canvas{
+    display:block; border-radius:8px; cursor:crosshair;
+    background:linear-gradient(180deg, var(--grass2) 0%, var(--grass) 100%);
+    box-shadow:inset 0 0 40px rgba(0,0,0,.3);
+  }
+  .tools{display:flex; gap:10px; margin-top:12px}
+  .tools button{
+    flex:1; padding:9px 0; font-size:14px; border:1px solid #3d5248;
+    background:#2c4138; color:var(--ink); border-radius:8px; cursor:pointer; font-family:inherit;
+  }
+  .tools button:hover:not(:disabled){background:#37523f; border-color:var(--accent)}
+  .tools button:disabled{opacity:.4; cursor:not-allowed}
+  .side{
+    width:300px; background:var(--panel); border-radius:14px; padding:16px;
+    box-shadow:0 8px 30px rgba(0,0,0,.4); display:flex; flex-direction:column; gap:12px;
+  }
+  .info-row{display:flex; justify-content:space-between; font-size:13.5px; color:var(--muted)}
+  .info-row b{color:var(--ink)}
+  .hand-title{font-size:13px; color:var(--muted)}
+  .hand{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+  .card{
+    border:1px solid #3d5248; background:#2c4138; border-radius:10px; padding:10px;
+    font-size:13px; cursor:pointer; text-align:center; transition:all .15s;
+  }
+  .card:hover{border-color:var(--accent)}
+  .card.selected{background:#4a5a2c; border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)}
+  .card .cost{font-size:11px; color:var(--muted); display:block; margin-top:4px}
+  .log-box{
+    flex:1; min-height:160px; max-height:300px; overflow-y:auto; font-size:12px;
+    line-height:1.7; background:#16221c; border:1px solid #33503f; border-radius:8px; padding:8px 10px;
+  }
+  .log-box .t{color:var(--muted)}
+  .log-box .ok{color:#9fd97f}
+  .log-box .err{color:var(--red)}
+  .result-banner{
+    background:#3a2f1a; border:1px solid var(--accent); color:var(--accent);
+    border-radius:8px; padding:10px; font-size:14px; text-align:center; display:none;
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="arena-wrap">
+    <div class="head">
+      <div class="title">CR-LLM-Arena</div>
+      <div class="status" id="status">准备中…</div>
+    </div>
+    <canvas id="arena" width="520" height="780"></canvas>
+    <div class="tools">
+      <button id="btn-ai">AI 行动</button>
+      <button id="btn-reset">重新开始</button>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="info-row"><span>你的圣水</span><b id="my-elixir">0</b></div>
+    <div class="info-row"><span>AI 圣水</span><b id="ai-elixir">0</b></div>
+    <div class="hand-title">你的手牌（点击选中，再点战场部署）</div>
+    <div class="hand" id="hand"></div>
+    <div class="result-banner" id="result"></div>
+    <div class="log-box" id="log"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const ARENA_W = 10, ARENA_H = 16;
+  const cnv = document.getElementById('arena');
+  const ctx = cnv.getContext('2d');
+  const pxW = cnv.width / ARENA_W;
+  const pxH = cnv.height / ARENA_H;
+  const $ = id => document.getElementById(id);
+  const logBox = $('log');
+  const CARD_NAMES = {
+    hog:"野猪骑士", cannon:"加农炮", goblin:"哥布林",
+    ice_spirit:"冰精灵", knight:"骑士", fireball:"火球", log:"滚木", zap:"电击法术"
+  };
+  const CARD_COSTS = {hog:4, cannon:3, goblin:2, ice_spirit:1, knight:3, fireball:4, log:2, zap:1};
+  let state = null;
+  let selected = null;
+  let busy = false;
+
+  function log(text, cls){
+    const d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.textContent = text;
+    logBox.appendChild(d);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function drawTower(tw, color){
+    const x = tw.x * pxW, y = tw.y * pxH, r = 20;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,.4)';
+    ctx.stroke();
+    // 血条
+    const ratio = Math.max(0, tw.hp / tw.max_hp);
+    ctx.fillStyle = 'rgba(0,0,0,.55)';
+    ctx.fillRect(x - 24, y - 34, 48, 5);
+    ctx.fillStyle = ratio > .5 ? '#7fd97f' : (ratio > .25 ? '#d9c07f' : '#d9544f');
+    ctx.fillRect(x - 24, y - 34, 48 * ratio, 5);
+  }
+
+  function draw(){
+    ctx.clearRect(0, 0, cnv.width, cnv.height);
+    // 中线
+    ctx.strokeStyle = 'rgba(255,255,255,.25)';
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, cnv.height / 2);
+    ctx.lineTo(cnv.width, cnv.height / 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (!state) return;
+    // 塔
+    drawTower(state.towers.ai.king, '#c9534d');
+    drawTower(state.towers.ai.left, '#a86f3a');
+    drawTower(state.towers.ai.right, '#a86f3a');
+    drawTower(state.towers.player.king, '#4d79c9');
+    drawTower(state.towers.player.left, '#3a86a8');
+    drawTower(state.towers.player.right, '#3a86a8');
+    // 单位
+    for (const u of state.units){
+      if (u.is_spell) continue;
+      const x = u.x * pxW, y = u.y * pxH, r = 11;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = u.team === 'ai' ? '#d9544f' : '#4f7fd9';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(0,0,0,.5)';
+      ctx.stroke();
+      // 血条
+      const ratio = Math.max(0, u.hp / u.max_hp);
+      ctx.fillStyle = 'rgba(0,0,0,.5)';
+      ctx.fillRect(x - 12, y - 22, 24, 3);
+      ctx.fillStyle = '#7fd97f';
+      ctx.fillRect(x - 12, y - 22, 24 * ratio, 3);
+    }
+  }
+
+  function render(){
+    if (!state) return;
+    $('my-elixir').textContent = state.player_elixir;
+    $('ai-elixir').textContent = state.ai_elixir;
+    const st = $('status');
+    if (state.game_over){
+      const map = {player:'你赢了', ai:'AI 赢了', draw:'平局'};
+      st.innerHTML = '对局结束';
+      const r = $('result');
+      r.style.display = 'block';
+      r.textContent = '对局结束：' + (map[state.winner] || state.winner);
+    } else {
+      st.innerHTML = '圣水 <b>' + state.player_elixir + '</b> / <b>' + state.ai_elixir + '</b>';
+    }
+    const hand = $('hand');
+    hand.innerHTML = '';
+    for (const c of state.player_hand){
+      const div = document.createElement('div');
+      div.className = 'card' + (selected === c ? ' selected' : '');
+      div.innerHTML = CARD_NAMES[c] || c;
+      div.innerHTML += '<span class="cost">⚡ ' + (CARD_COSTS[c] || '?') + '</span>';
+      div.onclick = () => { selected = c; render(); };
+      hand.appendChild(div);
+    }
+    draw();
+  }
+
+  async function refresh(){
+    const res = await fetch('/api/state');
+    state = await res.json();
+    render();
+  }
+
+  cnv.addEventListener('click', async e => {
+    if (busy || !state || state.game_over) return;
+    if (!selected){
+      log('请先点击手牌选择一张卡', 't');
+      return;
+    }
+    const rect = cnv.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width * ARENA_W;
+    const y = (e.clientY - rect.top) / rect.height * ARENA_H;
+    busy = true;
+    try {
+      const res = await fetch('/api/player_deploy', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({card: selected, x: Math.round(x*10)/10, y: Math.round(y*10)/10})
+      });
+      const ret = await res.json();
+      if (ret.ok){
+        log(`部署 ${CARD_NAMES[selected] || selected} (${x.toFixed(1)}, ${y.toFixed(1)})`, 'ok');
+      } else {
+        log('部署失败：' + ret.msg, 'err');
+      }
+      selected = null;
+      await refresh();
+    } finally {
+      busy = false;
+    }
+  });
+
+  $('btn-ai').addEventListener('click', async () => {
+    if (busy || !state || state.game_over) return;
+    busy = true;
+    log('AI 思考中…', 't');
+    try {
+      const res = await fetch('/api/ai_action', {method: 'POST'});
+      const ret = await res.json();
+      if (ret.action){
+        log(`AI 出 ${CARD_NAMES[ret.action.card] || ret.action.card} (${ret.action.x}, ${ret.action.y})` +
+            (ret.result.ok ? '' : ' → ' + ret.result.msg), ret.result.ok ? 'ok' : 'err');
+      } else {
+        log('AI 无有效决策（' + (ret.result && ret.result.msg || '未配置 Key') + ')', 'err');
+      }
+      await refresh();
+    } finally {
+      busy = false;
+    }
+  });
+
+  $('btn-reset').addEventListener('click', async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      await fetch('/api/reset', {method: 'POST'});
+      logBox.innerHTML = '';
+      $('result').style.display = 'none';
+      selected = null;
+      log('—— 新对局开始 ——', 't');
+      await refresh();
+    } finally {
+      busy = false;
+    }
+  });
+
+  refresh();
+  setInterval(() => { if (!busy) refresh(); }, 1000);
+})();
+</script>
+</body>
+</html>
